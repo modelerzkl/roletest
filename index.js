@@ -214,7 +214,7 @@ client.once('ready', async () => {
 async function updateAllUserRoles() {
     try {
         // Botが参加しているサーバーをID指定（YOUR_GUILD_IDを差し替え）
-        const guild = client.guilds.cache.get('1332700608951488573');
+        const guild = client.guilds.cache.get('764762485340766228');
         if (!guild) {
             console.error('Guildが見つかりません。YOUR_GUILD_IDを正しく設定してください。');
             return;
