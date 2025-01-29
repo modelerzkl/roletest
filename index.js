@@ -1,36 +1,40 @@
+//
 // index.js
-require('dotenv').config();
+//
+require('dotenv').config(); // .envファイルを使うときに必要
 const { Client, GatewayIntentBits, PermissionsBitField } = require('discord.js');
 const axios = require('axios');
 const sqlite3 = require('sqlite3').verbose();
 const abi = require('ethereumjs-abi');
-const { isValidAddress } = require('ethereumjs-util');
+const cron = require('node-cron'); // ← node-cron を使う
+const { isValidAddress } = require('ethereumjs-util'); // 必要なら利用
 
-// zkLink RPC endpoint
+// --- zkLink RPC endpoint (必要に応じて変更) ---
 const RPC_URL = 'https://rpc.zklink.io/';
 
-// ERC-20 balanceOf function signature
+// --- ERC-20 関数シグニチャ (balanceOf, decimals, symbol) ---
 const BALANCE_OF_SIGNATURE = 'balanceOf(address)';
 const DECIMALS_SIGNATURE = 'decimals()';
 const SYMBOL_SIGNATURE = 'symbol()';
 
-/**
- * Creates the data field of a function call using ABI encoding
- * @param {string} signature - Function signature
- * @param  {...any} params - Function parameters
- * @returns {string} - Encoded data field
- */
+// --- しきい値とロール名の対応表 ---
+const roleThresholds = [
+    { roleName: 'zklHolder 🟢', max: 5000 },
+    { roleName: 'zkLDolphin 🐬', max: 10000 },
+    { roleName: 'zklShark 🦈', max: 50000 },
+    { roleName: 'zklWhae 🐋', max: 100000 },
+    { roleName: 'zklHumpback 🐳', max: Infinity }
+];
+// まとめてロール名だけをリスト化（重複削除用）
+const roleNames = roleThresholds.map(item => item.roleName);
+
+// --- エンコード用ABI関数 ---
 function encodeFunctionCall(signature, ...params) {
     const encoded = abi.simpleEncode(signature, ...params);
     return '0x' + encoded.toString('hex');
 }
 
-/**
- * Sends a JSON-RPC request to call a function
- * @param {string} contractAddress - Contract address
- * @param {string} data - Encoded data field
- * @returns {Promise<string>} - Function return value (hexadecimal)
- */
+// --- RPCコール (eth_call) 関数 ---
 async function rpcCall(contractAddress, data) {
     const payload = {
         jsonrpc: '2.0',
@@ -47,138 +51,104 @@ async function rpcCall(contractAddress, data) {
 
     try {
         const response = await axios.post(RPC_URL, payload, {
-            headers: {
-                'Content-Type': 'application/json'
-            }
+            headers: { 'Content-Type': 'application/json' }
         });
-
         if (response.data.error) {
             throw new Error(response.data.error.message);
         }
-
         return response.data.result;
     } catch (error) {
         throw new Error(`RPC request error: ${error.message}`);
     }
 }
 
-/**
- * Converts a hexadecimal result to a decimal string
- * @param {string} hexValue - Hexadecimal value
- * @returns {string} - Decimal value
- */
+// --- 16進を10進に変換 ---
 function decodeHexToDecimal(hexValue) {
     return BigInt(hexValue).toString(10);
 }
 
-/**
- * Converts a hexadecimal value to an ASCII string
- * @param {string} hexValue - Hexadecimal value
- * @returns {string} - ASCII string
- */
+// --- 16進を文字列に変換 (symbol取得用) ---
 function decodeHexToString(hexValue) {
-    // Remove '0x' prefix and pad to byte units
     const hex = hexValue.startsWith('0x') ? hexValue.slice(2) : hexValue;
     const buf = Buffer.from(hex, 'hex');
-    // Remove trailing null bytes and strip control characters
     return buf.toString('utf8').replace(/\0/g, '').replace(/[\x00-\x1F\x7F]/g, '');
 }
 
-/**
- * Retrieves token balance, decimals, and symbol
- * @param {string} userAddr - User's wallet address
- * @param {string} tokenAddr - Token contract address
- * @returns {Promise<{balance: string, symbol: string}>}
- */
+// --- トークン残高・symbol取得 ---
 async function getTokenBalance(userAddr, tokenAddr) {
     try {
-        // balanceOf
+        // balanceOf(address)
         const balanceData = encodeFunctionCall(BALANCE_OF_SIGNATURE, userAddr);
         const hexBalance = await rpcCall(tokenAddr, balanceData);
-        const balance = decodeHexToDecimal(hexBalance);
-
-        // decimals
+        
+        // decimals()
         const decimalsData = encodeFunctionCall(DECIMALS_SIGNATURE);
         const hexDecimals = await rpcCall(tokenAddr, decimalsData);
-        const decimals = decodeHexToDecimal(hexDecimals);
-
-        // symbol
+        
+        // symbol()
         const symbolData = encodeFunctionCall(SYMBOL_SIGNATURE);
         const hexSymbol = await rpcCall(tokenAddr, symbolData);
+
+        const balance = decodeHexToDecimal(hexBalance);
+        const decimals = decodeHexToDecimal(hexDecimals);
         const symbol = decodeHexToString(hexSymbol);
 
-        // Convert to a readable format
+        // 人が読みやすい形へ (小数点付き)
         const formattedBalance = (BigInt(hexBalance) / (10n ** BigInt(decimals))).toString();
-
-        return {
-            balance: formattedBalance,
-            symbol: symbol
-        };
+        return { balance: formattedBalance, symbol: symbol };
     } catch (error) {
         throw new Error(`Token information retrieval error: ${error.message}`);
     }
 }
 
-/**
- * Function to resolve user ID from input
- * @param {Message} message - Discord message object
- * @param {string} input - User input (username, mention, or ID)
- * @returns {Promise<string|null>} - Resolved user ID or null
- */
+// --- UserID をいろいろな入力 (ユーザー名, メンション, ID) から取得 ---
 async function resolveUserId(message, input) {
-    // If in mention format, extract user ID
+    // 1) メンション形式 <@1234567890>
     const mentionMatch = input.match(/^<@!?(\d+)>$/);
     if (mentionMatch) {
         return mentionMatch[1];
     }
-
-    // If in user ID format, use directly
+    // 2) 数字のみ → 直接IDとみなす
     if (/^\d+$/.test(input)) {
         try {
             await message.guild.members.fetch(input);
             return input;
-        } catch (error) {
+        } catch {
             return null;
         }
     }
-
-    // Search using username and discriminator
+    // 3) username#discriminator or username
     const [username, discriminator] = input.split('#');
-    if (!username || !discriminator) {
-        // If discriminator is not included
-        // Search by username only
-        const members = await message.guild.members.fetch();
+    if (!username) {
+        return null;
+    }
+    const members = await message.guild.members.fetch();
+
+    // discriminator がない → ユーザー名のみで検索
+    if (!discriminator) {
         const member = members.find(m => m.user.username.toLowerCase() === username.toLowerCase());
-        if (member) {
-            return member.id;
-        }
+        return member ? member.id : null;
     } else {
-        // Search using username and discriminator
-        const members = await message.guild.members.fetch();
-        const member = members.find(m => 
-            m.user.username.toLowerCase() === username.toLowerCase() && 
+        // username#1234 形式
+        const member = members.find(m =>
+            m.user.username.toLowerCase() === username.toLowerCase() &&
             m.user.discriminator === discriminator
         );
-        if (member) {
-            return member.id;
-        }
+        return member ? member.id : null;
     }
-
-    // If user is not found
-    return null;
 }
 
-// Initialize Discord client
+// --- Discordクライアント初期化 ---
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.MessageContent // Added
+        GatewayIntentBits.MessageContent
     ]
 });
 
-// Connect to SQLite database
+// --- SQLite 接続 ---
 const db = new sqlite3.Database('./database.sqlite', (err) => {
     if (err) {
         console.error('Database connection error:', err.message);
@@ -187,177 +157,197 @@ const db = new sqlite3.Database('./database.sqlite', (err) => {
     }
 });
 
-// Create table
-db.run(`CREATE TABLE IF NOT EXISTS users (
+// --- DB テーブル作成 (なければ作る) ---
+db.run(`
+CREATE TABLE IF NOT EXISTS users (
     discord_user_id TEXT PRIMARY KEY,
     wallet_address TEXT NOT NULL
-);`);
+);
+`);
 
-// Code to run when the bot is ready
-client.once('ready', () => {
-    console.log(`Logged in as ${client.user.tag}!`);
-});
+// --- トークンコントラクトアドレス (例) ---
+const tokenContractAddress = '0xC967dabf591B1f4B86CFc74996EAD065867aF19E'; // 必要に応じて差し替え
 
-// Command processing
-client.on('messageCreate', async (message) => {
-    // Do not respond to the bot's own messages
-    if (message.author.bot) return;
+// --- ユーザーの残高を見てロールを付与する共通関数 ---
+async function assignRoleByBalance(member, balance, symbol, guild) {
+    // 既存の対象ロール(roleNames)を全部外す
+    const rolesToRemove = member.roles.cache.filter(r => roleNames.includes(r.name));
+    for (const [, roleObj] of rolesToRemove) {
+        await member.roles.remove(roleObj);
+    }
 
-    // Check if the message starts with a command
-    if (!message.content.startsWith('!')) return;
+    // 新規に付与するロール名を決定
+    let roleName = roleThresholds.find(th => balance < th.max).roleName;
 
-    // Split command and arguments
-    const args = message.content.slice(1).trim().split(/ +/);
-    const command = args.shift().toLowerCase();
-
-    // Function to check admin permissions
-    const isModerator = (member) => member.permissions.has(PermissionsBitField.Flags.ManageRoles);
-
-    // Add log
-    console.log(`Received command: ${command} from user: ${message.author.tag}`);
-
-    // `!register` command
-    if (command === 'register') {
-        // Only executable by administrators
-        if (!isModerator(message.member)) {
-            console.log(`User ${message.author.tag} attempted to run !register without permissions.`);
-            return message.reply('You do not have permission to execute this command.');
-        }
-
-        if (args.length < 2) {
-            console.log('!register command called without sufficient arguments.');
-            return message.reply('Usage: !register <DiscordUserName#Discriminator or @User or UserID> <WalletAddress>');
-        }
-
-        const userInput = args[0].replace(/['"]/g, '');
-        const walletAddress = args[1].replace(/['"]/g, '');
-
-        // Resolve user ID
-        const discordUserId = await resolveUserId(message, userInput);
-        if (!discordUserId) {
-            console.log(`User not found for input: ${userInput}`);
-            return message.reply('The specified user was not found. Please use a correct username#Discriminator, mention, or user ID.');
-        }
-
-        // Validate wallet address
-        const isValidWalletAddress = (address) => /^0x[a-fA-F0-9]{40}$/.test(address);
-        if (!isValidWalletAddress(walletAddress)) {
-            console.log(`Invalid wallet address provided: ${walletAddress}`);
-            return message.reply('Invalid wallet address.');
-        }
-
-        // Save to database
-        db.run(`INSERT OR REPLACE INTO users (discord_user_id, wallet_address) VALUES (?, ?)`, [discordUserId, walletAddress], function(err) {
-            if (err) {
-                console.error(err.message);
-                return message.reply('A database error occurred.');
-            }
-            console.log(`Registered user ID: ${discordUserId} with wallet address: ${walletAddress}`);
-            return message.reply(`Wallet address for user <@${discordUserId}> has been registered.`);
+    // 該当ロールがギルドに存在しない場合は新規作成
+    let role = guild.roles.cache.find(r => r.name === roleName);
+    if (!role) {
+        role = await guild.roles.create({
+            name: roleName,
+            color: 'Blue',
+            reason: `Automatically created role ${roleName}`
         });
     }
 
-    // `!checkbalance` command
-    if (command === 'checkbalance') {
-        // Only executable by administrators
+    // ロールを付与
+    await member.roles.add(role);
+
+    return { roleName, balance, symbol };
+}
+
+// --- Bot起動時 ---
+client.once('ready', async () => {
+    console.log(`Logged in as ${client.user.tag}!`);
+
+    // 毎日0:00 (日本時間) に実行したい場合 → timezoneを 'Asia/Tokyo' に
+    cron.schedule('0 0 * * *', async () => {
+        console.log('[CRON] 毎日 0:00 にトークン残高更新開始');
+        await updateAllUserRoles();
+        console.log('[CRON] トークン残高更新完了');
+    }, {
+        scheduled: true,
+        timezone: 'Asia/Tokyo' // ← 日本時間にあわせる場合 (UTCなら 'UTC')
+    });
+});
+
+// --- 毎日実行: DBに登録された全ユーザーの残高を取得しロール更新 ---
+async function updateAllUserRoles() {
+    try {
+        // Botが参加しているサーバーをID指定（YOUR_GUILD_IDを差し替え）
+        const guild = client.guilds.cache.get('1332700608951488573');
+        if (!guild) {
+            console.error('Guildが見つかりません。YOUR_GUILD_IDを正しく設定してください。');
+            return;
+        }
+
+        // DBから全ユーザー取得
+        db.all(`SELECT discord_user_id, wallet_address FROM users`, async (err, rows) => {
+            if (err) {
+                console.error('Database error:', err.message);
+                return;
+            }
+            if (!rows || rows.length === 0) {
+                console.log('登録ユーザーがいません。');
+                return;
+            }
+            // 1人ずつロール更新
+            for (const row of rows) {
+                const { discord_user_id, wallet_address } = row;
+                try {
+                    const member = await guild.members.fetch(discord_user_id);
+                    const { balance, symbol } = await getTokenBalance(wallet_address, tokenContractAddress);
+                    const numericBalance = parseFloat(balance);
+
+                    await assignRoleByBalance(member, numericBalance, symbol, guild);
+                    console.log(`[Daily update] ${member.user.tag} -> Balance: ${balance} ${symbol}`);
+                } catch (error) {
+                    console.error(`updateAllUserRolesエラー: ${error.message}`);
+                }
+            }
+        });
+    } catch (error) {
+        console.error(`updateAllUserRoles関数のエラー: ${error.message}`);
+    }
+}
+
+// --- メッセージコマンド監視 ---
+client.on('messageCreate', async (message) => {
+    // Bot自身のメッセージは無視
+    if (message.author.bot) return;
+    // コマンド判定
+    if (!message.content.startsWith('!')) return;
+
+    const args = message.content.slice(1).trim().split(/ +/);
+    const command = args.shift().toLowerCase();
+
+    // 管理者(ロール管理が可能)かチェック
+    const isModerator = (member) => member.permissions.has(PermissionsBitField.Flags.ManageRoles);
+
+    // 1) !register
+    if (command === 'register') {
         if (!isModerator(message.member)) {
-            console.log(`User ${message.author.tag} attempted to run !checkbalance without permissions.`);
             return message.reply('You do not have permission to execute this command.');
         }
-
-        if (args.length < 1) {
-            console.log('!checkbalance command called without sufficient arguments.');
-            return message.reply('Usage: !checkbalance <DiscordUserName#Discriminator or @User or UserID>');
+        if (args.length < 2) {
+            return message.reply('Usage: !register <DiscordUserName#Discriminator or @User or UserID> <WalletAddress>');
         }
-
         const userInput = args[0].replace(/['"]/g, '');
+        const walletAddress = args[1].replace(/['"]/g, '');
 
-        // Resolve user ID
         const discordUserId = await resolveUserId(message, userInput);
         if (!discordUserId) {
-            console.log(`User not found for input: ${userInput}`);
-            return message.reply('The specified user was not found. Please use a correct username#Discriminator, mention, or user ID.');
+            return message.reply('The specified user was not found.');
+        }
+        // ウォレットアドレス バリデーション(簡易)
+        const isValidWalletAddress = (address) => /^0x[a-fA-F0-9]{40}$/.test(address);
+        if (!isValidWalletAddress(walletAddress)) {
+            return message.reply('Invalid wallet address.');
         }
 
-        console.log(`Fetching balance for Discord User ID: ${discordUserId}`);
+        // DB登録 (既存なら上書き)
+        db.run(
+            `INSERT OR REPLACE INTO users (discord_user_id, wallet_address) VALUES (?, ?)`,
+            [discordUserId, walletAddress],
+            function(err) {
+                if (err) {
+                    console.error(err.message);
+                    return message.reply('A database error occurred.');
+                }
+                message.reply(`Wallet address for <@${discordUserId}> has been registered.`);
+            }
+        );
+    }
 
-        // Retrieve wallet address from database
+    // 2) !checkbalance
+    if (command === 'checkbalance') {
+        if (!isModerator(message.member)) {
+            return message.reply('You do not have permission to execute this command.');
+        }
+        if (args.length < 1) {
+            return message.reply('Usage: !checkbalance <DiscordUserName#Discriminator or @User or UserID>');
+        }
+        const userInput = args[0].replace(/['"]/g, '');
+        const discordUserId = await resolveUserId(message, userInput);
+        if (!discordUserId) {
+            return message.reply('The specified user was not found.');
+        }
+
+        // DBからウォレットアドレスを取得
         db.get(`SELECT wallet_address FROM users WHERE discord_user_id = ?`, [discordUserId], async (err, row) => {
             if (err) {
                 console.error('Database error:', err.message);
                 return message.reply('A database error occurred.');
             }
-
             if (!row) {
-                console.log(`No wallet address found for Discord User ID: ${discordUserId}`);
-                return message.reply('The specified user\'s wallet address was not found.');
+                return message.reply('This user has no registered wallet address.');
             }
-
             const walletAddress = row.wallet_address;
-            console.log(`Retrieved wallet address: ${walletAddress}`);
 
             try {
-                // Set token contract address
-                const tokenContractAddress = '0xC967dabf591B1f4B86CFc74996EAD065867aF19E'; // Replace with actual address
-
-                console.log(`Fetching token balance for wallet address: ${walletAddress} and token contract: ${tokenContractAddress}`);
-
+                // 残高取得
                 const { balance, symbol } = await getTokenBalance(walletAddress, tokenContractAddress);
+                const numericBalance = parseFloat(balance);
 
-                console.log(`Fetched balance: ${balance} ${symbol}`);
-
-                // Conditional branching
-                let roleName = '';
-                if (parseFloat(balance) < 5000) {
-                    roleName = 'zklHolder 🟢';
-                } else if (parseFloat(balance) < 10000) {
-                    roleName = 'zkLDolphin 🐬';
-                } else if (parseFloat(balance) < 50000) {
-                    roleName = 'zklShark 🦈';
-                } else if (parseFloat(balance) < 100000) {
-                    roleName = 'zklWhae 🐋';
-                } else {
-                    roleName = 'zklHumpback 🐳';
-                }
-
-                console.log(`Determined role name: ${roleName}`);
-
-                // Fetch Discord user
+                // ロール付与
+                const guild = message.guild;
                 const user = await client.users.fetch(discordUserId);
-                const member = await message.guild.members.fetch(user.id);
+                const member = await guild.members.fetch(user.id);
+                const { roleName } = await assignRoleByBalance(member, numericBalance, symbol, guild);
 
-                console.log(`Fetched member: ${member.user.tag}`);
-
-                // Get or create role
-                let role = message.guild.roles.cache.find(r => r.name === roleName);
-                if (!role) {
-                    console.log(`Role ${roleName} does not exist. Creating new role.`);
-                    role = await message.guild.roles.create({
-                        name: roleName,
-                        color: 'Blue', // Change as needed
-                        reason: `Automatically created role ${roleName}`,
-                    });
-                    console.log(`Created role: ${roleName}`);
-                } else {
-                    console.log(`Found existing role: ${roleName}`);
-                }
-
-                // Add role
-                await member.roles.add(role);
-                console.log(`Assigned role ${roleName} to user ${user.tag}`);
-
-                // Sanitize symbol to display balance and symbol correctly
+                // メッセージ
                 const sanitizedSymbol = symbol.replace(/[\x00-\x1F\x7F]/g, '');
-
-                message.reply(`${user.tag} has been assigned the role ${roleName}. Balance: ${balance} ${sanitizedSymbol}`);
+                message.reply(
+                    `${user.tag} has been assigned the role "${roleName}".\n` +
+                    `Balance: ${balance} ${sanitizedSymbol}`
+                );
             } catch (error) {
-                console.error('Error during balance check and role assignment:', error);
+                console.error('Error:', error);
                 return message.reply('An error occurred while retrieving the token balance.');
             }
         });
     }
 });
 
-// Bot login
+// --- Discordボット ログイン (トークンは .env で設定) ---
 client.login(process.env.DISCORD_TOKEN);
 
