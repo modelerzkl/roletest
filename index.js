@@ -19,10 +19,10 @@ const SYMBOL_SIGNATURE = 'symbol()';
 
 // --- しきい値とロール名の対応表 ---
 const roleThresholds = [
-    { roleName: 'zklHolder 🟢', max: 5000 },
+    { roleName: 'zklHolder', max: 5000 },
     { roleName: 'zkLDolphin 🐬', max: 10000 },
     { roleName: 'zklShark 🦈', max: 50000 },
-    { roleName: 'zklWhae 🐋', max: 100000 },
+    { roleName: 'zklWhale 🐋', max: 100000 },
     { roleName: 'zklHumpback 🐳', max: Infinity }
 ];
 // まとめてロール名だけをリスト化（重複削除用）
