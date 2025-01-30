@@ -1,23 +1,23 @@
 //
 // index.js
 //
-require('dotenv').config(); // .envファイルを使うときに必要
+require('dotenv').config(); // Required when using .env files
 const { Client, GatewayIntentBits, PermissionsBitField } = require('discord.js');
 const axios = require('axios');
 const sqlite3 = require('sqlite3').verbose();
 const abi = require('ethereumjs-abi');
-const cron = require('node-cron'); // ← node-cron を使う
-const { isValidAddress } = require('ethereumjs-util'); // 必要なら利用
+const cron = require('node-cron'); // Using node-cron
+const { isValidAddress } = require('ethereumjs-util'); // Use if needed
 
-// --- zkLink RPC endpoint (必要に応じて変更) ---
+// --- zkLink RPC endpoint (change as needed) ---
 const RPC_URL = 'https://rpc.zklink.io/';
 
-// --- ERC-20 関数シグニチャ (balanceOf, decimals, symbol) ---
+// --- ERC-20 function signatures (balanceOf, decimals, symbol) ---
 const BALANCE_OF_SIGNATURE = 'balanceOf(address)';
 const DECIMALS_SIGNATURE = 'decimals()';
 const SYMBOL_SIGNATURE = 'symbol()';
 
-// --- しきい値とロール名の対応表 ---
+// --- Table mapping thresholds to role names ---
 const roleThresholds = [
     { roleName: 'zklHolder', max: 5000 },
     { roleName: 'zkLDolphin 🐬', max: 10000 },
@@ -25,16 +25,16 @@ const roleThresholds = [
     { roleName: 'zklWhale 🐋', max: 100000 },
     { roleName: 'zklHumpback 🐳', max: Infinity }
 ];
-// まとめてロール名だけをリスト化（重複削除用）
+// Collect only role names into a list (for deduplication)
 const roleNames = roleThresholds.map(item => item.roleName);
 
-// --- エンコード用ABI関数 ---
+// --- ABI function for encoding ---
 function encodeFunctionCall(signature, ...params) {
     const encoded = abi.simpleEncode(signature, ...params);
     return '0x' + encoded.toString('hex');
 }
 
-// --- RPCコール (eth_call) 関数 ---
+// --- RPC call (eth_call) function ---
 async function rpcCall(contractAddress, data) {
     const payload = {
         jsonrpc: '2.0',
@@ -62,19 +62,19 @@ async function rpcCall(contractAddress, data) {
     }
 }
 
-// --- 16進を10進に変換 ---
+// --- Convert hexadecimal to decimal ---
 function decodeHexToDecimal(hexValue) {
     return BigInt(hexValue).toString(10);
 }
 
-// --- 16進を文字列に変換 (symbol取得用) ---
+// --- Convert hexadecimal to string (for symbol retrieval) ---
 function decodeHexToString(hexValue) {
     const hex = hexValue.startsWith('0x') ? hexValue.slice(2) : hexValue;
     const buf = Buffer.from(hex, 'hex');
     return buf.toString('utf8').replace(/\0/g, '').replace(/[\x00-\x1F\x7F]/g, '');
 }
 
-// --- トークン残高・symbol取得 ---
+// --- Retrieve token balance and symbol ---
 async function getTokenBalance(userAddr, tokenAddr) {
     try {
         // balanceOf(address)
@@ -93,7 +93,7 @@ async function getTokenBalance(userAddr, tokenAddr) {
         const decimals = decodeHexToDecimal(hexDecimals);
         const symbol = decodeHexToString(hexSymbol);
 
-        // 人が読みやすい形へ (小数点付き)
+        // Convert to a human-readable format (with decimals)
         const formattedBalance = (BigInt(hexBalance) / (10n ** BigInt(decimals))).toString();
         return { balance: formattedBalance, symbol: symbol };
     } catch (error) {
@@ -101,14 +101,14 @@ async function getTokenBalance(userAddr, tokenAddr) {
     }
 }
 
-// --- UserID をいろいろな入力 (ユーザー名, メンション, ID) から取得 ---
+// --- Retrieve UserID from various inputs (username, mention, ID) ---
 async function resolveUserId(message, input) {
-    // 1) メンション形式 <@1234567890>
+    // 1) Mention format <@1234567890>
     const mentionMatch = input.match(/^<@!?(\d+)>$/);
     if (mentionMatch) {
         return mentionMatch[1];
     }
-    // 2) 数字のみ → 直接IDとみなす
+    // 2) Only digits => treat as direct ID
     if (/^\d+$/.test(input)) {
         try {
             await message.guild.members.fetch(input);
@@ -124,12 +124,12 @@ async function resolveUserId(message, input) {
     }
     const members = await message.guild.members.fetch();
 
-    // discriminator がない → ユーザー名のみで検索
+    // If there is no discriminator => search by username only
     if (!discriminator) {
         const member = members.find(m => m.user.username.toLowerCase() === username.toLowerCase());
         return member ? member.id : null;
     } else {
-        // username#1234 形式
+        // username#1234 format
         const member = members.find(m =>
             m.user.username.toLowerCase() === username.toLowerCase() &&
             m.user.discriminator === discriminator
@@ -138,7 +138,7 @@ async function resolveUserId(message, input) {
     }
 }
 
-// --- Discordクライアント初期化 ---
+// --- Initialize Discord client ---
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -148,7 +148,7 @@ const client = new Client({
     ]
 });
 
-// --- SQLite 接続 ---
+// --- Connect to SQLite ---
 const db = new sqlite3.Database('./database.sqlite', (err) => {
     if (err) {
         console.error('Database connection error:', err.message);
@@ -157,7 +157,7 @@ const db = new sqlite3.Database('./database.sqlite', (err) => {
     }
 });
 
-// --- DB テーブル作成 (なければ作る) ---
+// --- Create DB table (if it does not exist) ---
 db.run(`
 CREATE TABLE IF NOT EXISTS users (
     discord_user_id TEXT PRIMARY KEY,
@@ -165,21 +165,21 @@ CREATE TABLE IF NOT EXISTS users (
 );
 `);
 
-// --- トークンコントラクトアドレス (例) ---
-const tokenContractAddress = '0xC967dabf591B1f4B86CFc74996EAD065867aF19E'; // 必要に応じて差し替え
+// --- Token contract address ---
+const tokenContractAddress = '0xC967dabf591B1f4B86CFc74996EAD065867aF19E'; // Replace as needed
 
-// --- ユーザーの残高を見てロールを付与する共通関数 ---
+// --- Common function to assign roles based on user balance ---
 async function assignRoleByBalance(member, balance, symbol, guild) {
-    // 既存の対象ロール(roleNames)を全部外す
+    // Remove all existing target roles (roleNames)
     const rolesToRemove = member.roles.cache.filter(r => roleNames.includes(r.name));
     for (const [, roleObj] of rolesToRemove) {
         await member.roles.remove(roleObj);
     }
 
-    // 新規に付与するロール名を決定
+    // Decide the new role name to be assigned
     let roleName = roleThresholds.find(th => balance < th.max).roleName;
 
-    // 該当ロールがギルドに存在しない場合は新規作成
+    // If the relevant role does not exist in the guild, create it new
     let role = guild.roles.cache.find(r => r.name === roleName);
     if (!role) {
         role = await guild.roles.create({
@@ -189,48 +189,48 @@ async function assignRoleByBalance(member, balance, symbol, guild) {
         });
     }
 
-    // ロールを付与
+    // Assign the role
     await member.roles.add(role);
 
     return { roleName, balance, symbol };
 }
 
-// --- Bot起動時 ---
+// --- When the bot starts ---
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}!`);
 
-    // 毎日0:00 (日本時間) に実行したい場合 → timezoneを 'Asia/Tokyo' に
+    // If you want to run at 0:00 every day (Japan time), set timezone to 'Asia/Tokyo'
     cron.schedule('0 0 * * *', async () => {
-        console.log('[CRON] 毎日 0:00 にトークン残高更新開始');
+        console.log('[CRON] Starting token balance update at 0:00 every day');
         await updateAllUserRoles();
-        console.log('[CRON] トークン残高更新完了');
+        console.log('[CRON] Token balance update complete');
     }, {
         scheduled: true,
-        timezone: 'Asia/Tokyo' // ← 日本時間にあわせる場合 (UTCなら 'UTC')
+        timezone: 'UTC' // For matching Japan time (Use 'UTC' for UTC)
     });
 });
 
-// --- 毎日実行: DBに登録された全ユーザーの残高を取得しロール更新 ---
+// --- Run daily: Retrieve the balances of all users in the DB and update roles ---
 async function updateAllUserRoles() {
     try {
-        // Botが参加しているサーバーをID指定（YOUR_GUILD_IDを差し替え）
-        const guild = client.guilds.cache.get('764762485340766228');
+        // Specify the ID of the server the bot has joined (replace YOUR_GUILD_ID)
+        const guild = client.guilds.cache.get('839458691983605832');
         if (!guild) {
-            console.error('Guildが見つかりません。YOUR_GUILD_IDを正しく設定してください。');
+            console.error('Guild not found. Please set YOUR_GUILD_ID correctly.');
             return;
         }
 
-        // DBから全ユーザー取得
+        // Retrieve all users from the DB
         db.all(`SELECT discord_user_id, wallet_address FROM users`, async (err, rows) => {
             if (err) {
                 console.error('Database error:', err.message);
                 return;
             }
             if (!rows || rows.length === 0) {
-                console.log('登録ユーザーがいません。');
+                console.log('There are no registered users.');
                 return;
             }
-            // 1人ずつロール更新
+            // Update roles for each user one by one
             for (const row of rows) {
                 const { discord_user_id, wallet_address } = row;
                 try {
@@ -241,26 +241,26 @@ async function updateAllUserRoles() {
                     await assignRoleByBalance(member, numericBalance, symbol, guild);
                     console.log(`[Daily update] ${member.user.tag} -> Balance: ${balance} ${symbol}`);
                 } catch (error) {
-                    console.error(`updateAllUserRolesエラー: ${error.message}`);
+                    console.error(`updateAllUserRoles error: ${error.message}`);
                 }
             }
         });
     } catch (error) {
-        console.error(`updateAllUserRoles関数のエラー: ${error.message}`);
+        console.error(`updateAllUserRoles function error: ${error.message}`);
     }
 }
 
-// --- メッセージコマンド監視 ---
+// --- Monitor message commands ---
 client.on('messageCreate', async (message) => {
-    // Bot自身のメッセージは無視
+    // Ignore messages from the bot itself
     if (message.author.bot) return;
-    // コマンド判定
+    // Check for commands
     if (!message.content.startsWith('!')) return;
 
     const args = message.content.slice(1).trim().split(/ +/);
     const command = args.shift().toLowerCase();
 
-    // 管理者(ロール管理が可能)かチェック
+    // Check if user is an admin (can manage roles)
     const isModerator = (member) => member.permissions.has(PermissionsBitField.Flags.ManageRoles);
 
     // 1) !register
@@ -278,13 +278,13 @@ client.on('messageCreate', async (message) => {
         if (!discordUserId) {
             return message.reply('The specified user was not found.');
         }
-        // ウォレットアドレス バリデーション(簡易)
+        // Validate wallet address (simple check)
         const isValidWalletAddress = (address) => /^0x[a-fA-F0-9]{40}$/.test(address);
         if (!isValidWalletAddress(walletAddress)) {
             return message.reply('Invalid wallet address.');
         }
 
-        // DB登録 (既存なら上書き)
+        // Register in DB (overwrite if it exists)
         db.run(
             `INSERT OR REPLACE INTO users (discord_user_id, wallet_address) VALUES (?, ?)`,
             [discordUserId, walletAddress],
@@ -312,7 +312,7 @@ client.on('messageCreate', async (message) => {
             return message.reply('The specified user was not found.');
         }
 
-        // DBからウォレットアドレスを取得
+        // Retrieve wallet address from DB
         db.get(`SELECT wallet_address FROM users WHERE discord_user_id = ?`, [discordUserId], async (err, row) => {
             if (err) {
                 console.error('Database error:', err.message);
@@ -324,17 +324,17 @@ client.on('messageCreate', async (message) => {
             const walletAddress = row.wallet_address;
 
             try {
-                // 残高取得
+                // Get balance
                 const { balance, symbol } = await getTokenBalance(walletAddress, tokenContractAddress);
                 const numericBalance = parseFloat(balance);
 
-                // ロール付与
+                // Assign role
                 const guild = message.guild;
                 const user = await client.users.fetch(discordUserId);
                 const member = await guild.members.fetch(user.id);
                 const { roleName } = await assignRoleByBalance(member, numericBalance, symbol, guild);
 
-                // メッセージ
+                // Message
                 const sanitizedSymbol = symbol.replace(/[\x00-\x1F\x7F]/g, '');
                 message.reply(
                     `${user.tag} has been assigned the role "${roleName}".\n` +
@@ -348,6 +348,6 @@ client.on('messageCreate', async (message) => {
     }
 });
 
-// --- Discordボット ログイン (トークンは .env で設定) ---
+// --- Discord bot login (token set in .env) ---
 client.login(process.env.DISCORD_TOKEN);
 
